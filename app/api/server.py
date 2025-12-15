@@ -1,20 +1,22 @@
 # app/api/server.py
 
-from fastapi import Request
-from app.integrations.greenapi import send_text_message
-
 from typing import Optional, Union
-from fastapi.middleware.cors import CORSMiddleware
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.agent import run_ainova_agent
 
+# Если WhatsApp/GreenAPI пока не нужен — импорт можно оставить,
+# но эндпоинт ты можешь не использовать.
+from app.integrations.greenapi import send_text_message
+
+
 app = FastAPI(
     title="AINOVA Agent API",
     description="Единый мозг ассистента AINOVA, доступный по HTTP.",
-    version="0.1.0",
+    version="0.2.0",
 )
 
 app.add_middleware(
@@ -25,10 +27,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class AgentRequest(BaseModel):
     user_id: Union[int, str]
     username: Optional[str] = None
     message: str
+
+    # Мягкая подготовка к multi-tenant и каналам:
+    # старые клиенты это поле не отправляют — им не мешает.
+    client_id: Optional[str] = None
+    channel: Optional[str] = None  # "web" | "telegram" | "whatsapp" | ...
 
 
 class AgentResponse(BaseModel):
@@ -38,25 +46,24 @@ class AgentResponse(BaseModel):
 def normalize_user_id(raw_id: Union[int, str]) -> int:
     """
     Преобразуем любой user_id (строка или число) в стабильное целое число.
-    Это нужно, чтобы один и тот же пользователь (по user_id)
-    имел свою память, даже если приходит с разных источников.
+    Нужно, чтобы один и тот же пользователь имел свою память независимо от канала.
     """
     if isinstance(raw_id, int):
         return raw_id
-    # если строка — хэшируем и берём по модулю
     return abs(hash(raw_id)) % (10**9)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 @app.post("/agent", response_model=AgentResponse)
 async def agent_endpoint(payload: AgentRequest):
     """
-    Единая точка входа в AINOVA Agent для всех каналов:
-    - Telegram
-    - WhatsApp
-    - Web-чат (сайт)
-    - n8n и т.д.
+    Единая точка входа в AINOVA Agent для всех каналов.
 
-    На вход: user_id, username, message.
+    На вход: user_id, username, message (+ опционально client_id, channel).
     На выход: answer.
     """
     ext_id = normalize_user_id(payload.user_id)
@@ -65,54 +72,50 @@ async def agent_endpoint(payload: AgentRequest):
         user_external_id=ext_id,
         username=payload.username,
         user_text=payload.message,
+        client_id=payload.client_id or "default",
+        channel=payload.channel or "web",
     )
 
     return AgentResponse(answer=answer)
+
 
 @app.post("/webhooks/greenapi")
 async def greenapi_webhook(request: Request):
     """
     Вебхук для уведомлений от Green API.
-    Берём входящее сообщение, прогоняем через AINOVA-агента, отправляем ответ в WhatsApp.
+    Сейчас WhatsApp отключён — этот эндпоинт можно не трогать.
     """
     payload = await request.json()
 
-    # Тип вебхука (нас интересуют входящие сообщения)
     type_webhook = payload.get("typeWebhook")
     if type_webhook != "incomingMessageReceived":
-        # Игнорируем всё, что не входящее сообщение
         return {"status": "ignored", "type": type_webhook}
 
     sender_data = payload.get("senderData", {}) or {}
     message_data = payload.get("messageData", {}) or {}
 
-    chat_id = sender_data.get("chatId")  # вида '79991234567@c.us'
+    chat_id = sender_data.get("chatId")
     username = sender_data.get("senderName") or sender_data.get("chatName") or "whatsapp_user"
 
-    # Вытаскиваем текст из текстового сообщения
     text_message_data = message_data.get("textMessageData") or {}
     user_text = text_message_data.get("textMessage")
 
     if not chat_id or not user_text:
         return {"status": "no_text_or_chat", "chat_id": chat_id, "user_text": user_text}
 
-    # Связываем WhatsApp-пользователя с нашим user_id
-    # Можно просто использовать chat_id как внешний ID
     user_external_id = f"wa:{chat_id}"
 
-    # Вызываем наш мозг
     answer = await run_ainova_agent(
         user_external_id=user_external_id,
         username=username,
         user_text=user_text,
+        client_id="default",
+        channel="whatsapp",
     )
 
-    # Отправляем ответ назад в WhatsApp
     try:
         send_text_message(chat_id, answer)
     except Exception as e:
-        # Просто логируем в ответ, чтобы видеть в /docs или логах
         return {"status": "error_send", "detail": str(e)}
 
     return {"status": "ok", "answer": answer}
-

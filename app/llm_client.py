@@ -1,21 +1,11 @@
 # app/llm_client.py
 
-from typing import List, Dict
+from typing import Dict, List, Optional
+
 from openai import AsyncOpenAI
 
 from app.config import PROXYAPI_API_KEY
 
-if not PROXYAPI_API_KEY:
-    raise RuntimeError("PROXYAPI_API_KEY не найден. Заполни его в .env")
-
-# Клиент ProxyAPI (OpenAI-совместимый эндпоинт)
-# Документацию по моделям и ценам смотри у ProxyAPI.
-client = AsyncOpenAI(
-    api_key=PROXYAPI_API_KEY,
-    base_url="https://openai.api.proxyapi.ru/v1",
-)
-
-# По умолчанию можно использовать gpt-4o-mini, потом поменяем при желании
 DEFAULT_MODEL_NAME = "gpt-4o-mini"
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -23,6 +13,29 @@ DEFAULT_SYSTEM_PROMPT = (
     "Отвечаешь по-делу, простым языком, иногда даёшь короткие советы бизнесу. "
     "Если вопрос не по теме, отвечай кратко и дружелюбно."
 )
+
+_client: Optional[AsyncOpenAI] = None
+
+
+def get_client() -> AsyncOpenAI:
+    """
+    Лениво создаём клиента. Это важно, чтобы приложение не падало при импорте модулей,
+    если ключ не задан (например, в среде без .env).
+    """
+    global _client
+
+    if _client is not None:
+        return _client
+
+    if not PROXYAPI_API_KEY:
+        # Не валим импорт всего приложения — валим только конкретный запрос.
+        raise RuntimeError("PROXYAPI_API_KEY не найден. Заполни его в .env")
+
+    _client = AsyncOpenAI(
+        api_key=PROXYAPI_API_KEY,
+        base_url="https://openai.api.proxyapi.ru/v1",
+    )
+    return _client
 
 
 async def ask_llm(
@@ -32,17 +45,20 @@ async def ask_llm(
 ) -> str:
     """
     Универсальная функция для запроса к LLM через ProxyAPI.
-    messages — список словарей формата:
+    messages — список:
     [{"role": "system" | "user" | "assistant", "content": "..."}, ...]
     """
     try:
+        client = get_client()
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
             stream=False,
         )
-        return response.choices[0].message.content
+
+        content = response.choices[0].message.content
+        return content or ""
     except Exception as e:
         # Временно логируем ошибку в консоль
         print("Ошибка при запросе к LLM через ProxyAPI:", repr(e))
