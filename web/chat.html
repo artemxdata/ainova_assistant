@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>AINOVA Web Chat</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #e5e7eb;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+    }
+    .chat-container {
+      width: 100%;
+      max-width: 480px;
+      background: #020617;
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 20px 50px rgba(15, 23, 42, 0.8);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .chat-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+    .chat-title {
+      font-size: 18px;
+      font-weight: 600;
+    }
+    .chat-subtitle {
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      max-height: 360px;
+      padding: 8px;
+      border-radius: 8px;
+      background: #020617;
+      border: 1px solid #1f2933;
+    }
+    .message {
+      margin-bottom: 8px;
+      padding: 8px 10px;
+      border-radius: 12px;
+      max-width: 80%;
+      font-size: 14px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+    .message.user {
+      margin-left: auto;
+      background: #1d4ed8;
+    }
+    .message.bot {
+      margin-right: auto;
+      background: #111827;
+      border: 1px solid #1f2937;
+    }
+    .input-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .input-row input {
+      flex: 1;
+      padding: 10px;
+      border-radius: 999px;
+      border: 1px solid #1f2937;
+      background: #020617;
+      color: #e5e7eb;
+      outline: none;
+      font-size: 14px;
+    }
+    .input-row button {
+      padding: 10px 16px;
+      border-radius: 999px;
+      border: none;
+      background: #22c55e;
+      color: #020617;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .input-row button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+  </style>
+</head>
+<body>
+  <div class="chat-container">
+    <div class="chat-header">
+      <div>
+        <div class="chat-title">AINOVA Web Chat</div>
+        <div class="chat-subtitle">Задай вопрос — ответит AI-ассистент</div>
+      </div>
+      <div style="font-size: 11px; color: #6b7280;">beta</div>
+    </div>
+
+    <div id="messages" class="messages"></div>
+
+    <div class="input-row">
+      <input id="input" type="text" placeholder="Напиши сообщение..." />
+      <button id="sendBtn">▶</button>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = "http://127.0.0.1:8000/agent"; // наш FastAPI
+
+    const messagesEl = document.getElementById("messages");
+    const inputEl = document.getElementById("input");
+    const sendBtn = document.getElementById("sendBtn");
+
+    // фиктивный user_id для веб-пользователя
+    const WEB_USER_ID = "web-demo-user-1";
+    const USERNAME = "web_user";
+
+    function addMessage(text, role) {
+      const div = document.createElement("div");
+      div.classList.add("message", role);
+      div.textContent = text;
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const text = inputEl.value.trim();
+      if (!text) return;
+
+      addMessage(text, "user");
+      inputEl.value = "";
+      inputEl.focus();
+
+      sendBtn.disabled = true;
+      addMessage("Думаю над ответом...", "bot");
+      const loadingEl = messagesEl.lastChild;
+
+      try {
+        const resp = await fetch(API_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            user_id: WEB_USER_ID,
+            username: USERNAME,
+            message: text,
+          }),
+        });
+
+        const data = await resp.json();
+        messagesEl.removeChild(loadingEl);
+        addMessage(data.answer || "Нет ответа 🤔", "bot");
+      } catch (err) {
+        console.error(err);
+        messagesEl.removeChild(loadingEl);
+        addMessage("Ошибка при запросе к серверу 😢", "bot");
+      } finally {
+        sendBtn.disabled = false;
+      }
+    }
+
+    sendBtn.addEventListener("click", sendMessage);
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        sendMessage();
+      }
+    });
+  </script>
+</body>
+</html>
