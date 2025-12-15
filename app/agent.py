@@ -2,16 +2,14 @@
 
 from typing import List, Optional, Union
 
-from app.llm_client import ask_llm, DEFAULT_SYSTEM_PROMPT
+from app.config import ENABLE_RAG, HISTORY_LIMIT, RAG_TOP_K, RAG_MAX_CHARS
+from app.llm_client import ask_llm
 from app.memory.repository import get_or_create_user, get_last_messages, add_message
+from app.prompts import load_system_prompt, load_developer_prompt
 from app.rag.retriever import retrieve_documents
 
 
 def build_rag_block(docs) -> str:
-    """
-    Формируем аккуратный блок контекста для модели.
-    Важно: делаем структуру, чтобы меньше галлюцинаций и проще дебажить.
-    """
     if not docs:
         return ""
 
@@ -21,7 +19,13 @@ def build_rag_block(docs) -> str:
         content = (doc.content or "").strip()
         parts.append(f"[Источник {i}] {title}\n{content}")
 
-    return "\n\n---\n\n".join(parts)
+    block = "\n\n---\n\n".join(parts)
+
+    # ограничим размер, чтобы не раздувать контекст
+    if len(block) > RAG_MAX_CHARS:
+        block = block[:RAG_MAX_CHARS].rstrip() + "\n\n[...контекст обрезан...]"
+
+    return block
 
 
 async def run_ainova_agent(
@@ -31,73 +35,53 @@ async def run_ainova_agent(
     client_id: str = "default",
     channel: str = "web",
 ) -> str:
-    """
-    Единый вход в "мозг" ассистента AINOVA.
-
-    На вход:
-      - user_external_id: внешний ID пользователя (web/tg/wa и т.д.)
-      - username: имя/логин, если есть
-      - user_text: текст сообщения
-      - client_id: мягкая заготовка под multi-tenant (пока default)
-      - channel: источник (web/telegram/whatsapp)
-
-    На выход:
-      - текст ответа LLM с учётом памяти и RAG.
-    """
-
-    # 1) Пользователь/память
-    # (Да, поле telegram_id пока историческое — позже переименуем в external_id)
+    # 1) пользователь/память
     user = get_or_create_user(
         telegram_id=str(user_external_id),
         username=username,
     )
 
-    # 2) История (лимит оставим 12 как у тебя, это ок)
-    history_messages = get_last_messages(user_id=user.id, limit=12)
+    # 2) история
+    history_messages = get_last_messages(user_id=user.id, limit=HISTORY_LIMIT)
 
-    # 3) Собираем messages для LLM
+    # 3) промпты
+    system_prompt = load_system_prompt()
+    developer_prompt = load_developer_prompt()
+
+    # 4) messages
     messages: List[dict] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": developer_prompt},
         {
             "role": "system",
-            "content": DEFAULT_SYSTEM_PROMPT
-        },
-        {
-            "role": "system",
-            "content": (
-                f"Технические метаданные (не упоминай пользователю): "
-                f"client_id={client_id}, channel={channel}."
-            ),
+            "content": f"Технические метаданные (не упоминай пользователю): client_id={client_id}, channel={channel}.",
         },
     ]
 
     for msg in history_messages:
         messages.append({"role": msg.role, "content": msg.content})
 
-    # 4) RAG retrieval (top_k можно потом вынести в config)
-    rag_docs = retrieve_documents(user_text, top_k=2)
-
-    rag_block = build_rag_block(rag_docs)
-    if rag_block:
-        messages.append(
-            {
+    # 5) RAG
+    if ENABLE_RAG:
+        rag_docs = retrieve_documents(user_text, top_k=RAG_TOP_K)
+        rag_block = build_rag_block(rag_docs)
+        if rag_block:
+            messages.append({
                 "role": "system",
                 "content": (
-                    "Ниже справочная информация из базы знаний. "
-                    "Используй её как опору для фактов. "
-                    "Если в базе нет ответа — отвечай по общим знаниям или уточняй. "
-                    "Не говори, что ты читаешь документы.\n\n"
+                    "Ниже справочная информация из базы знаний. Используй её как опору для фактов. "
+                    "Если в базе нет ответа — уточни или предложи следующий шаг.\n\n"
                     f"{rag_block}"
                 ),
-            }
-        )
+            })
 
-    # 5) Сообщение пользователя
+    # 6) user message
     messages.append({"role": "user", "content": user_text})
 
-    # 6) LLM
+    # 7) LLM
     answer = await ask_llm(messages)
 
-    # 7) Сохранение в память
+    # 8) save memory
     add_message(user_id=user.id, role="user", content=user_text)
     add_message(user_id=user.id, role="assistant", content=answer)
 
